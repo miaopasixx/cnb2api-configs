@@ -1,0 +1,1 @@
+[/app/cnb2api -config /app/config.json]
