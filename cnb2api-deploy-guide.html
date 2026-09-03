@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CNB2API 服务器完整部署文档</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #333; line-height: 1.8; }
+.container { max-width: 960px; margin: 0 auto; padding: 40px 30px; background: #fff; min-height: 100vh; box-shadow: 0 0 30px rgba(0,0,0,0.06); }
+h1 { font-size: 2em; color: #1a1a2e; border-bottom: 3px solid #2563eb; padding-bottom: 14px; margin: 45px 0 22px; }
+h2 { font-size: 1.5em; color: #1e3a5f; border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; margin: 38px 0 16px; }
+h3 { font-size: 1.2em; color: #2d3748; margin: 28px 0 12px; }
+h4 { font-size: 1.05em; color: #4a5568; margin: 22px 0 10px; }
+p { margin: 14px 0; }
+code { background: #edf2f7; padding: 3px 8px; border-radius: 4px; font-family: 'SF Mono', 'Consolas', 'Monaco', monospace; font-size: 0.88em; color: #c7254e; }
+pre { background: #1e293b; color: #e2e8f0; padding: 22px; border-radius: 10px; overflow-x: auto; margin: 18px 0; }
+pre code { background: none; padding: 0; color: #e2e8f0; font-size: 0.85em; }
+table { width: 100%; border-collapse: collapse; margin: 18px 0; border-radius: 8px; overflow: hidden; }
+th, td { border: 1px solid #e2e8f0; padding: 12px 16px; text-align: left; }
+th { background: #2563eb; color: #fff; font-weight: 600; font-size: 0.95em; }
+tr:nth-child(even) { background: #f8fafc; }
+tr:hover { background: #e8f0fe; }
+ul, ol { margin: 12px 0 12px 28px; }
+li { margin: 6px 0; }
+blockquote { border-left: 4px solid #2563eb; padding: 12px 22px; margin: 18px 0; background: #eff6ff; color: #475569; border-radius: 0 8px 8px 0; }
+strong { color: #1a1a2e; font-weight: 600; }
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: none; border-top: 1px solid #e2e8f0; margin: 35px 0; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>CNB2API 服务器完整部署文档</h1>
+<h2>一、服务器环境</h2>
+<ul>
+<li><strong>操作系统</strong>：Ubuntu 24.04.4 LTS (Noble Numbat)</li>
+<li><strong>Docker 版本</strong>：29.7.2</li>
+<li><strong>反向代理</strong>：Caddy（端口 80）</li>
+<li><strong>服务器 IP</strong>：124.220.1.243</li>
+</ul>
+<hr />
+<h2>二、运行中的服务</h2>
+<table>
+<thead>
+<tr>
+<th>容器名称</th>
+<th>镜像</th>
+<th>端口映射</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>cnb2api-gateway</td>
+<td>cnb2api-cnb2api:latest</td>
+<td>7863:7863</td>
+<td>CNB API 反向代理网关</td>
+</tr>
+<tr>
+<td>cnb2api-toolforge</td>
+<td>cnb2api-toolforge:latest</td>
+<td>18080:8080</td>
+<td>前置中间件（上下文压缩/协议转换）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>架构流程：</strong></p>
+<pre><code>客户端 -&gt; ToolForge(:18080) -&gt; cnb2api-gateway(:7863) -&gt; CNB API
+</code></pre>
+<hr />
+<h2>三、项目文件结构</h2>
+<pre><code>/tmp/cnb2api/                          # 主项目目录
+├── docker/
+│   ├── config.yaml                     # ToolForge 配置文件
+│   └── toolforge/                      # ToolForge 子模块
+│       └── app/
+│           ├── engine/orchestrator.py  # 核心编排逻辑
+│           ├── stream/openai_sse.py    # OpenAI SSE 流式处理
+│           └── fc/policy.py            # FC 模式策略
+├── config.example.json                 # cnb2api-gateway 配置模板
+├── docker-compose.yml                  # Docker Compose 编排文件
+├── Dockerfile.cnb2api                  # cnb2api-gateway 构建文件
+└── go.mod                              # Go 模块定义
+
+/etc/caddy/Caddyfile                    # Caddy 反向代理配置
+/usr/share/caddy/                       # Caddy 静态文件目录
+</code></pre>
+<hr />
+<h2>四、配置文件详解</h2>
+<h3>4.1 ToolForge 配置（/tmp/cnb2api/docker/config.yaml）</h3>
+<pre><code class="language-yaml">server:
+  host: &quot;0.0.0.0&quot;
+  port: 8080
+  timeout_seconds: 180
+
+upstreams:
+  - name: cnb2api
+    type: openai_compat
+    base_url: &quot;http://cnb2api:7863/v1&quot;
+    api_key: &quot;***&quot;
+    models: [&quot;deepseek-v4-flash&quot;, &quot;deepseek-v4-pro&quot;, &quot;*&quot;]
+    native_fc: false
+    is_default: true
+
+features:
+  fc_mode: prompt              # 重要：必须为 prompt
+  enable_streaming: true
+  enable_fc_error_retry: true
+  fc_error_retry_max: 2
+  strip_think_tags: true
+  inject_protocol: XYML
+  convert_developer_to_system: true
+</code></pre>
+<h3>4.2 cnb2api-gateway 配置（/tmp/cnb2api/config.example.json）</h3>
+<pre><code class="language-json">{
+  &quot;listen&quot;: &quot;:7863&quot;,
+  &quot;api_key&quot;: &quot;***&quot;,
+  &quot;model&quot;: &quot;deepseek-v4-flash&quot;,
+  &quot;models&quot;: [&quot;deepseek-v4-flash&quot;, &quot;deepseek-v4-pro&quot;],
+  &quot;pool_min&quot;: 2,
+  &quot;pool_max&quot;: 32,
+  &quot;ttl_minutes&quot;: 30
+}
+</code></pre>
+<h3>4.3 Caddy 配置（/etc/caddy/Caddyfile）</h3>
+<pre><code>:80 {
+    root * /usr/share/caddy
+    file_server
+}
+</code></pre>
+<hr />
+<h2>五、完整部署步骤</h2>
+<h3>步骤1：安装 Docker</h3>
+<pre><code class="language-bash"># 安装 Docker
+curl -fsSL https://get.docker.com | sudo sh
+sudo systemctl enable docker
+sudo systemctl start docker
+
+# 验证安装
+sudo docker version
+</code></pre>
+<h3>步骤2：安装 Caddy</h3>
+<pre><code class="language-bash">sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install caddy
+
+# 配置 Caddy（静态文件服务）
+sudo tee /etc/caddy/Caddyfile &lt;&lt; 'EOF'
+:80 {
+    root * /usr/share/caddy
+    file_server
+}
+EOF
+sudo systemctl reload caddy
+</code></pre>
+<h3>步骤3：克隆项目代码</h3>
+<pre><code class="language-bash"># 克隆主项目
+git clone https://github.com/miaopasixx/cnb2api.git /tmp/cnb2api
+cd /tmp/cnb2api
+
+# 初始化子模块
+git submodule update --init --recursive
+</code></pre>
+<h3>步骤4：配置 API 密钥</h3>
+<pre><code class="language-bash"># 编辑 ToolForge 配置
+vim /tmp/cnb2api/docker/config.yaml
+# 修改 upstreams.api_key 为你的 CNB API 密钥
+
+# 编辑 Gateway 配置
+vim /tmp/cnb2api/config.example.json
+# 修改 api_key 为你的 CNB API 密钥
+</code></pre>
+<h3>步骤5：构建并启动服务</h3>
+<pre><code class="language-bash">cd /tmp/cnb2api
+
+# 构建镜像
+docker compose build
+
+# 启动服务
+docker compose up -d
+
+# 查看服务状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f
+</code></pre>
+<h3>步骤6：验证服务</h3>
+<pre><code class="language-bash"># 检查 ToolForge 健康状态
+curl http://localhost:18080/healthz
+
+# 检查 Gateway 健康状态
+curl http://localhost:7863/healthz
+
+# 查看可用模型
+curl http://localhost:18080/v1/models
+
+# 测试聊天请求
+curl http://localhost:18080/v1/chat/completions   -H &quot;Content-Type: application/json&quot;   -d '{&quot;model&quot;:&quot;deepseek-v4-flash&quot;,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;Hello&quot;}]}'
+</code></pre>
+<hr />
+<h2>六、已实施的修复</h2>
+<h3>6.1 XYML/DSML 标签泄露修复</h3>
+<p><strong>问题：</strong> 模型响应中出现未解析的 XYML/DSML 标签泄露到客户端</p>
+<p><strong>修复文件清单：</strong></p>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>修改内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>config.yaml</td>
+<td>fc_mode 改为 prompt</td>
+</tr>
+<tr>
+<td>fc/policy.py</td>
+<td>禁用 passthrough 分支</td>
+</tr>
+<tr>
+<td>engine/orchestrator.py</td>
+<td>添加正则清理逻辑</td>
+</tr>
+<tr>
+<td>stream/openai_sse.py</td>
+<td>添加流式过滤函数</td>
+</tr>
+</tbody>
+</table>
+<p><strong>最终正则表达式：</strong></p>
+<pre><code class="language-python">pattern = r'&lt;/?[|｜] ?[^&gt;]*(XYML|DSML)[^&gt;]*&gt;'
+result = re.sub(pattern, '', text, flags=re.IGNORECASE)
+</code></pre>
+<h3>6.2 修复部署方式</h3>
+<p>由于容器使用 bind mount 挂载配置文件（只读），修改代码需要：</p>
+<pre><code class="language-bash"># 1. 从容器复制文件到宿主机
+sudo docker cp cnb2api-toolforge:/app/app/engine/orchestrator.py /home/ubuntu/orchestrator.py
+
+# 2. 修改文件
+vim /home/ubuntu/orchestrator.py
+
+# 3. 复制回容器
+sudo docker cp /home/ubuntu/orchestrator.py cnb2api-toolforge:/app/app/engine/orchestrator.py
+
+# 4. 重启容器
+sudo docker restart cnb2api-toolforge
+</code></pre>
+<hr />
+<h2>七、常见问题与解决方案</h2>
+<h3>7.1 fc_mode 配置不生效</h3>
+<p><strong>原因：</strong> 配置值与代码中判断的值不匹配
+- 配置文件注释说有效值是 <code>force_prompt</code>
+- 但代码中判断的是 <code>prompt</code></p>
+<p><strong>解决：</strong> 将 fc_mode 改为 <code>prompt</code></p>
+<h3>7.2 非流式请求标签泄露</h3>
+<p><strong>原因：</strong> 无工具定义时走 passthrough 透传模式</p>
+<p><strong>解决：</strong> 修改 fc/policy.py，禁用 passthrough 分支</p>
+<h3>7.3 正则过滤无效</h3>
+<p><strong>原因：</strong> 正则表达式要求两个连续分隔符，但实际标签只有一个</p>
+<p><strong>解决：</strong> 修正正则表达式，去掉多余的分隔符要求</p>
+<h3>7.4 关闭标签泄露</h3>
+<p><strong>原因：</strong> 正则不支持 <code>&lt;/</code> 前缀的关闭标签</p>
+<p><strong>解决：</strong> 添加 <code>/?</code> 匹配可选的斜杠</p>
+<h3>7.5 混合格式标签泄露</h3>
+<p><strong>原因：</strong> DSML 和 XYML 标签嵌套，协议名不在固定位置</p>
+<p><strong>解决：</strong> 使用更宽松的正则 <code>[^&gt;]*(XYML|DSML)[^&gt;]*</code></p>
+<h3>7.6 GitHub 推送卡住</h3>
+<p><strong>原因：</strong> HTTPS 连接被 TLS 中断</p>
+<p><strong>解决：</strong> 改用 SSH 方式推送</p>
+<pre><code class="language-bash">git remote set-url origin git@github.com:miaopasixx/cnb2api-toolforge.git
+</code></pre>
+<hr />
+<h2>八、GitHub 仓库</h2>
+<table>
+<thead>
+<tr>
+<th>仓库</th>
+<th>地址</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>cnb2api</td>
+<td>https://github.com/miaopasixx/cnb2api</td>
+<td>主项目代码</td>
+</tr>
+<tr>
+<td>cnb2api-toolforge</td>
+<td>https://github.com/miaopasixx/cnb2api-toolforge</td>
+<td>中间件子模块</td>
+</tr>
+<tr>
+<td>cnb2api-configs</td>
+<td>https://github.com/miaopasixx/cnb2api-configs</td>
+<td>配置备份与文档</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>九、日常维护命令</h2>
+<pre><code class="language-bash"># 查看容器状态
+sudo docker ps
+
+# 查看容器日志
+sudo docker logs -f cnb2api-toolforge
+sudo docker logs -f cnb2api-gateway
+
+# 重启服务
+sudo docker restart cnb2api-toolforge
+sudo docker restart cnb2api-gateway
+
+# 更新镜像
+cd /tmp/cnb2api
+git pull
+docker compose build
+docker compose up -d
+
+# 备份配置
+cd /tmp/cnb2api-configs
+git add .
+git commit -m &quot;backup: 配置备份&quot;
+git push
+</code></pre>
+</div>
+</body>
+</html>
